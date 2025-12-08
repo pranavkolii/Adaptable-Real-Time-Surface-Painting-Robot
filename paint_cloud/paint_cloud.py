@@ -8,9 +8,12 @@ from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 
 import numpy as np
-import numpy as np
 import open3d as o3d
 import struct
+from sensor_msgs_py import point_cloud2
+import tf2_ros
+import tf_transformations
+from geometry_msgs.msg import TransformStamped
 
 
 class PaintCloud(Node):
@@ -22,13 +25,33 @@ class PaintCloud(Node):
         self.normal_pub = self.create_publisher(
             MarkerArray, 'surface_normals', 10)
 
-        self.get_logger().info("Started the paint_cloud node")
+        # Subscribers
+        self.create_subscription(
+            PointCloud2,
+            '/realsense/points',
+            self.pointcloud_callback,
+            10
+        )
+
+        self.declare_parameter('downsample_factor', 100)
+
+        self.points = None
+        self.pcd_header = None
+        
+        # TF Listener
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         timer_period = 5  # seconds
         self.timer = self.create_timer(timer_period, self.timer_callback)
 
+        self.get_logger().info("Started the paint_cloud node")
+
     def timer_callback(self):
-        self.generate_mock_pc()
+        if self.points is None:
+            self.get_logger().info("Waiting for pointcloud...")
+            return
+
         self.estimate_surface_normals()
         self.publish_message()
         self.get_logger().info("Published the message")
@@ -61,6 +84,89 @@ class PaintCloud(Node):
         self.get_logger().info(f"Generated {len(self.points)} mock points \
                 with length: {length}, width: {width}, spacing: {spacing}")
 
+    def pointcloud_callback(self, msg):
+        new_points = None
+        
+        # Optimize for the specific Realsense format provided
+        # x(0), y(4), z(8), rgb(16), point_step=24, Little Endian (usually)
+        if msg.point_step == 24:
+            try:
+                # Structured dtype matching the memory layout
+                dtype_list = [
+                    ('x', '<f4'),
+                    ('y', '<f4'),
+                    ('z', '<f4'),
+                    ('skip1', 'V4'), # Offset 12-16
+                    ('rgb', '<f4'),
+                    ('skip2', 'V4')  # Offset 20-24
+                ]
+                
+                # If big endian, swap byte order in dtype
+                if msg.is_bigendian:
+                    dtype_list = [(n, f.replace('<', '>')) for n, f in dtype_list]
+                
+                raw_data = np.frombuffer(msg.data, dtype=dtype_list)
+                
+                # Stack x, y, z
+                points = np.column_stack((raw_data['x'], raw_data['y'], raw_data['z']))
+                
+                # Filter NaNs
+                # Check for NaNs in any coordinate
+                mask = ~np.isnan(points).any(axis=1)
+                new_points = points[mask]
+
+            except Exception as e:
+                self.get_logger().warn(f"Fast parse failed: {e}. Falling back to standard reader.")
+        
+        if new_points is None:
+            # Fallback for other formats
+            gen = point_cloud2.read_points(msg, skip_nans=True, field_names=("x", "y", "z"))
+            new_points = np.array(list(gen))
+
+        if new_points.size > 0:
+            # Downsample
+            factor = self.get_parameter('downsample_factor').get_parameter_value().integer_value
+            if factor > 1:
+                new_points = new_points[::factor]
+
+            # Transform to world frame
+            try:
+                # Lookup transform from 'world' to sensor frame (msg.header.frame_id)
+                # We want to transform points IN sensor frame TO world frame.
+                # So we need transform T_world_sensor
+                trans = self.tf_buffer.lookup_transform(
+                    'world', 
+                    msg.header.frame_id, 
+                    # Use time 0 for latest to avoid sync issues, or msg.header.stamp
+                    # Using stamp is safer if available, but might fail if lag. 
+                    # Let's use latest for robustness in this simple node.
+                    rclpy.time.Time() 
+                )
+                
+                # Apply transform
+                # translation
+                t = trans.transform.translation
+                translation = np.array([t.x, t.y, t.z])
+                
+                # rotation (quaternion)
+                r = trans.transform.rotation
+                quaternion = [r.x, r.y, r.z, r.w]
+                rotation_matrix = tf_transformations.quaternion_matrix(quaternion)[:3, :3]
+                
+                # Formula: P_world = R * P_sensor + T
+                new_points = np.dot(new_points, rotation_matrix.T) + translation
+                
+                # Update header to world
+                self.pcd_header = msg.header
+                self.pcd_header.frame_id = 'world'
+                self.points = new_points
+
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+                self.get_logger().warn(f"TF Lookup failed: {e}")
+                return
+
+            # self.get_logger().info(f"Received {len(self.points)} points")
+
     def estimate_surface_normals(self):
         """
         Estimate the surface normals of from the pointcloud collected
@@ -90,12 +196,12 @@ class PaintCloud(Node):
         Takes in the points, and corresponding surface normals, and publishes 
         them as ros messages for visualization in rviz 
         """
+        if self.pcd_header is None:
+            self.get_logger().warn("PC header not set. Skipping publish")
+            return
 
-        timestamp = self.get_clock().now().to_msg()
-        header = Header()
-        header.stamp = timestamp
-        header.frame_id = "map"  # Fixed frame for RViz
-
+        header = self.pcd_header
+        
         # --- Publish PointCloud2 ---
         pc2_msg = self.create_pointcloud2_msg(self.points, header)
         self.pcd_pub.publish(pc2_msg)
