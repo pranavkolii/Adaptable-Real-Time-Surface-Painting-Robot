@@ -1,0 +1,6 @@
+# Request (empty)
+
+---
+# Response
+geometry_msgs/PoseArray poses
+
