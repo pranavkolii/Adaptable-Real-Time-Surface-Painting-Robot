@@ -30,7 +30,7 @@ A ROS 2 package for generating robot manipulator painting paths from 3D percepti
 - **Python Libraries**:
   - `open3d`
   - `scipy`
-  - `numpy`
+  - `numpy (<1.24)`
   - `transforms3d` (or `tf_transformations`)
 
 ### Building
