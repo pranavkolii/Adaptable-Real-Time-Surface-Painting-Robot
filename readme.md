@@ -2,6 +2,8 @@
 
 A ROS 2 package for generating robot manipulator painting paths from 3D perception data.
 
+[![Project Demo](https://img.youtube.com/vi/ujLB43V4m5M/0.jpg)](https://www.youtube.com/watch?v=ujLB43V4m5M)
+
 ## Project Overview
 
 **Goal**: Develop a real-time system that scans an arbitrary object, plans a coverage path adaptively, and executes the painting trajectory using a UR5-based manipulator.
@@ -30,7 +32,7 @@ A ROS 2 package for generating robot manipulator painting paths from 3D percepti
 - **Python Libraries**:
   - `open3d`
   - `scipy`
-  - `numpy (<1.24)`
+  - `numpy`
   - `transforms3d` (or `tf_transformations`)
 
 ### Building
