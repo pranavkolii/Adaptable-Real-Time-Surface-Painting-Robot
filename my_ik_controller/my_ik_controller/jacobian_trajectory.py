@@ -2,10 +2,11 @@ import rclpy
 from rclpy.node import Node
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
-from paint_cloud_msgs.srv import GetPaintPath # Import the service
+from paint_cloud_msgs.srv import GetPaintPath 
 import numpy as np
 import math
 import time
+import matplotlib.pyplot as plt
 
 class JacobianIKSolver(Node):
 
@@ -22,7 +23,6 @@ class JacobianIKSolver(Node):
         self.cli = self.create_client(GetPaintPath, '/get_paint_path')
         
         # UR5 Standard DH Parameters (a, alpha, d, theta_offset)
-        # Derived from standard UR5 specs
         self.dh_params = [
             [0,         np.pi/2,  0.089159, 0],       # Joint 1
             [-0.425,    0,        0,        0],       # Joint 2
@@ -68,11 +68,7 @@ class JacobianIKSolver(Node):
         return final_pos, transforms
 
     def compute_jacobian(self, transforms):
-        """
-        Computes the Geometric Jacobian (6x6 matrix).
-        Rows 0-2: Linear Velocity
-        Rows 3-5: Angular Velocity
-        """
+        """Computes the Geometric Jacobian (6x6 matrix)."""
         J = np.zeros((6, 6))
         
         # End-effector position
@@ -83,27 +79,18 @@ class JacobianIKSolver(Node):
         p_prev = np.array([0, 0, 0]) # Origin of base
         
         for i in range(6):
-            # Geometric Jacobian formula for revolute joints:
-            # Linear part = z_(i-1) x (p_e - p_(i-1))
-            # Angular part = z_(i-1)
+            # Geometric Jacobian formula for revolute joints
+            J[:3, i] = np.cross(z_prev, (p_e - p_prev)) # Linear part
+            J[3:, i] = z_prev                           # Angular part
             
-            # Cross product for linear velocity
-            J[:3, i] = np.cross(z_prev, (p_e - p_prev))
-            
-            # Angular velocity
-            J[3:, i] = z_prev
-            
-            # Update for next iteration (using transform of current link i)
-            z_prev = transforms[i][:3, 2] # 3rd column is Z-axis
-            p_prev = transforms[i][:3, 3] # 4th column is Position
+            # Update for next iteration
+            z_prev = transforms[i][:3, 2] 
+            p_prev = transforms[i][:3, 3] 
             
         return J
 
     def solve_ik(self, target_pos, initial_joints, tolerance=0.01, max_iter=100):
-        """
-        Newton-Raphson method using Pseudo-Inverse.
-        Currently solves for POSITION (x,y,z) only to keep it stable.
-        """
+        """Newton-Raphson method using Pseudo-Inverse."""
         q = np.array(initial_joints, dtype=float)
         
         for _ in range(max_iter):
@@ -118,14 +105,12 @@ class JacobianIKSolver(Node):
             
             # Get Jacobian
             J = self.compute_jacobian(transforms)
-            
-            # We only care about position (rows 0:3), ignoring orientation for simplicity
             J_pos = J[:3, :] 
             
             # Calculate Pseudo-Inverse (Moore-Penrose)
             J_pinv = np.linalg.pinv(J_pos)
             
-            # Update joints: q_new = q + J_pinv * error
+            # Update joints
             delta_q = np.dot(J_pinv, error_pos)
             q += delta_q * 0.5 
             
@@ -138,17 +123,11 @@ class JacobianIKSolver(Node):
             self.get_logger().info('Service not available, waiting...')
 
         req = GetPaintPath.Request()
-        
-        # Call the service asynchronously
         future = self.cli.call_async(req)
-        
-        # Spin until the future is complete (blocking here to get result)
         rclpy.spin_until_future_complete(self, future)
         
         if future.result() is not None:
             response = future.result()
-            # Extract [x, y, z] from geometry_msgs/PoseArray
-            # Note: The structure is response -> poses (PoseArray) -> poses (list of Pose)
             points = []
             for pose in response.poses.poses:
                 points.append([pose.position.x, pose.position.y, pose.position.z])
@@ -173,8 +152,12 @@ class JacobianIKSolver(Node):
 
         traj_msg = JointTrajectory()
         traj_msg.joint_names = self.joint_names
-        
-        time_from_start = 2.0 # seconds per point
+        time_from_start = 2.0 
+
+        # === PLOTTING DATA CONTAINERS ===
+        joint_history = []
+        ee_pos_history = []
+        # ================================
 
         for i, point in enumerate(waypoints):
             self.get_logger().info(f"Solving IK for point: {point}")
@@ -182,6 +165,13 @@ class JacobianIKSolver(Node):
             # Solve IK for this point
             target = np.array(point)
             new_joints = self.solve_ik(target, current_joints)
+            
+            # Compute FK for the *solved* joints to verify/plot actual path
+            actual_pos, _ = self.forward_kinematics(new_joints)
+            
+            # Store data for plotting
+            joint_history.append(new_joints)
+            ee_pos_history.append(actual_pos)
             
             # Update current_joints so next iteration starts from here
             current_joints = new_joints
@@ -194,6 +184,48 @@ class JacobianIKSolver(Node):
 
         self.get_logger().info("Publishing Trajectory...")
         self.publisher_.publish(traj_msg)
+        
+        # === PLOTTING SECTION ===
+        # We pass 'waypoints' (the target input) to the plotter
+        self.plot_results(joint_history, ee_pos_history, waypoints)
+
+    def plot_results(self, joint_hist, pos_hist, target_path):
+        """Generates plots for Joint Angles and End Effector Path vs Target"""
+        joint_hist = np.array(joint_hist)
+        pos_hist = np.array(pos_hist)
+        target_path = np.array(target_path) # Convert input list to array
+        steps = np.arange(len(joint_hist))
+
+        # 1. Plot End Effector X-Y Plane
+        plt.figure(figsize=(8, 8))
+        
+        # Plot Target Input (Green dashed line with 'x' markers)
+        plt.plot(target_path[:, 0], target_path[:, 1], 'g--x', label='Target Input')
+        
+        # Plot Computed IK Result (Blue solid line with 'o' markers)
+        plt.plot(pos_hist[:, 0], pos_hist[:, 1], 'b-o', alpha=0.6, label='Computed IK')
+        
+        plt.title("Trajectory Tracking: Target vs Computed (X-Y Plane)")
+        plt.xlabel("X (m)")
+        plt.ylabel("Y (m)")
+        plt.axis('equal')
+        plt.grid(True)
+        plt.legend()
+        
+        # 2. Plot Individual Joint Positions (3x2 Subplots)
+        fig, axes = plt.subplots(3, 2, figsize=(12, 10))
+        fig.suptitle("Joint Angles over Waypoints")
+        
+        for i, ax in enumerate(axes.flat):
+            if i < 6:
+                ax.plot(steps, joint_hist[:, i], 'r-')
+                ax.set_title(self.joint_names[i])
+                ax.set_ylabel("Radians")
+                ax.set_xlabel("Waypoint Index")
+                ax.grid(True)
+        
+        plt.tight_layout()
+        plt.show()
 
 def main(args=None):
     rclpy.init(args=args)
