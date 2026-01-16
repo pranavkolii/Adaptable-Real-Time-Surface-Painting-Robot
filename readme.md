@@ -101,3 +101,7 @@ You can configure the following parameters in `paint_cloud.py`:
 | Service | Type | Description |
 |---------|------|-------------|
 | `get_paint_path` | `paint_cloud_msgs/GetPaintPath` | Triggers path generation and returns the path poses. |
+
+### Outcomes
+* Architected an autonomous painting system using a 6-DoF UR5 articulated arm, to reconstruct unknown surface geometries and autonomously generate adaptive zig-zag trajectories in real-time.
+* Developed a perception-driven control framework in ROS2 and C++, implementing a numerical Jacobian pseudo-inverse solver for inverse kinematics and Principal Component Analysis (PCA) to extract surface normals for high-precision tool orientation.
