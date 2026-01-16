@@ -1,4 +1,4 @@
-# Paint Cloud
+# Adaptable Real-Time Surface Painting Robot
 
 A ROS 2 package for generating robot manipulator painting paths from 3D perception data.
 
